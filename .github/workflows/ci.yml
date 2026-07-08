@@ -62,7 +62,7 @@ jobs:
       - name: Lint with ruff
         run: |
           pip install ruff
-          ruff check . --quiet || echo "Lint warnings found (non-blocking)"
+          ruff check jtech/ --quiet || echo "Lint warnings found (non-blocking)"
 
       - name: Type check with mypy
         run: |
@@ -144,7 +144,7 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-latest
-    needs: [lint-and-typecheck]
+    needs: [lint-and-typecheck, test]
     steps:
       - uses: actions/checkout@v4
 

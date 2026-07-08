@@ -1,5 +1,8 @@
 name: Deploy Products
 
+# REQUIREMENT: This workflow deploys to GitHub Pages.
+# Go to repo Settings → Pages → Source: "GitHub Actions" for this to work.
+
 on:
   push:
     branches: [main]
