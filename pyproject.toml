@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jtech"
+version = "1.0.0"
+description = "JTECH — Self-building AI company that builds and sells software products"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "JTECH AI", email = "build@jtech.ai"},
+]
+
+dependencies = [
+    "click>=8.1",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+jtech = "jtech.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jtech*"]
+
+[tool.jtech]
+version = "1.0.0"
