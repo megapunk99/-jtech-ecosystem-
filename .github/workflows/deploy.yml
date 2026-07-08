@@ -1,0 +1,215 @@
+name: Deploy Products
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'built_products/**'
+      - 'jtech/builder.py'
+      - 'jtech/studio.py'
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: 'Product ID to deploy'
+        required: false
+        type: number
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-catalog:
+    name: Build Product Catalog
+    runs-on: ubuntu-latest
+    outputs:
+      has_products: ${{ steps.check.outputs.has_products }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install JTECH
+        run: |
+          pip install -e .
+
+      - name: Check for built products
+        id: check
+        run: |
+          if [ -d "built_products" ] && [ "$(ls -A built_products)" ]; then
+            echo "has_products=true" >> $GITHUB_OUTPUT
+            echo "Found products to deploy"
+          else
+            echo "has_products=false" >> $GITHUB_OUTPUT
+            echo "No products found to deploy"
+          fi
+
+      - name: Collect preview pages
+        if: steps.check.outputs.has_products == 'true'
+        run: |
+          mkdir -p _site
+          mkdir -p _site/products
+
+          # Collect all preview/landing pages from built products
+          for product_dir in built_products/*/; do
+            product_name=$(basename "$product_dir")
+            echo "Processing $product_name..."
+
+            # Copy preview.html if it exists
+            if [ -f "$product_dir/preview.html" ]; then
+              mkdir -p "_site/products/$product_name"
+              cp "$product_dir/preview.html" "_site/products/$product_name/index.html"
+              echo "  -> Added preview"
+            fi
+
+            # Copy landing.html as fallback
+            if [ -f "$product_dir/landing.html" ] && [ ! -f "_site/products/$product_name/index.html" ]; then
+              mkdir -p "_site/products/$product_name"
+              cp "$product_dir/landing.html" "_site/products/$product_name/index.html"
+              echo "  -> Added landing page"
+            fi
+
+            # Copy logo
+            if [ -f "$product_dir/logo.svg" ]; then
+              cp "$product_dir/logo.svg" "_site/products/$product_name/logo.svg"
+            fi
+
+            # Copy product spec if available
+            if [ -f "$product_dir/product_spec.json" ]; then
+              cp "$product_dir/product_spec.json" "_site/products/$product_name/spec.json"
+            fi
+
+            # Copy market strategy if available
+            if [ -f "$product_dir/market_strategy.json" ]; then
+              cp "$product_dir/market_strategy.json" "_site/products/$product_name/market.json"
+            fi
+          done
+
+      - name: Generate main index page
+        if: steps.check.outputs.has_products == 'true'
+        run: |
+          cat > _site/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>JTECH Product Showcase</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+              @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+              * { font-family: 'Inter', system-ui, sans-serif; }
+              .gradient-text {
+                background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+              }
+            </style>
+          </head>
+          <body class="bg-gray-50 text-gray-900">
+            <div class="max-w-6xl mx-auto px-6 py-16">
+              <div class="text-center mb-16">
+                <h1 class="text-5xl font-extrabold gradient-text mb-4">JTECH Ecosystem</h1>
+                <p class="text-xl text-gray-500">AI-Built Software Products — Powered by NVIDIA DeepSeek</p>
+                <a href="https://github.com/megapunk99/-jtech-ecosystem-" 
+                   class="inline-block mt-6 px-6 py-3 bg-gray-900 text-white rounded-xl font-medium 
+                          hover:bg-gray-800 transition-colors">
+                  View on GitHub →
+                </a>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 products-grid">
+                <!-- Products injected by CI -->
+              </div>
+
+              <footer class="mt-24 text-center text-sm text-gray-400">
+                <p>Built by <a href="https://github.com/megapunk99" class="text-gray-600 hover:text-gray-900">megapunk99</a> · Powered by JTECH</p>
+              </footer>
+            </div>
+            <script>
+              fetch('products/products.json')
+                .then(r => r.json())
+                .then(products => {
+                  const grid = document.querySelector('.products-grid');
+                  if (!products.length) {
+                    grid.innerHTML = '<p class="col-span-full text-center text-gray-400">No products yet</p>';
+                    return;
+                  }
+                  grid.innerHTML = products.map(p => `
+                    <a href="products/${p.slug}/" class="block bg-white rounded-2xl shadow-sm border border-gray-100 
+                      p-6 hover:shadow-lg hover:border-gray-200 transition-all group">
+                      ${p.logo ? `<img src="products/${p.slug}/logo.svg" class="w-12 h-12 mb-4" alt="${p.name}" />` 
+                        : `<div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl mb-4 
+                             flex items-center justify-center text-white font-bold text-lg">${p.name[0]}</div>`}
+                      <h3 class="font-semibold text-lg group-hover:text-blue-600 transition-colors">${p.name}</h3>
+                      <p class="text-sm text-gray-500 mt-2 line-clamp-2">${p.description}</p>
+                      ${p.price ? `<p class="text-sm font-medium text-gray-700 mt-3">$${p.price.toFixed(2)}</p>` : ''}
+                      <span class="inline-block mt-4 text-sm text-blue-600 font-medium opacity-0 
+                        group-hover:opacity-100 transition-opacity">View product →</span>
+                    </a>
+                  `).join('');
+                });
+            </script>
+          </body>
+          </html>
+          HTML
+
+      - name: Generate products manifest
+        if: steps.check.outputs.has_products == 'true'
+        run: |
+          echo '[' > _site/products/products.json
+          first=true
+          for product_dir in built_products/*/; do
+            product_name=$(basename "$product_dir")
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo ',' >> _site/products/products.json
+            fi
+
+            # Extract info from spec if available
+            if [ -f "$product_dir/product_spec.json" ]; then
+              name=$(python3 -c "import json; d=json.load(open('$product_dir/product_spec.json')); print(d.get('name','$product_name'))")
+              desc=$(python3 -c "import json; d=json.load(open('$product_dir/product_spec.json')); print(d.get('description','')[:200])")
+              price=$(python3 -c "import json; d=json.load(open('$product_dir/product_spec.json')); print(d.get('price','null'))")
+            else
+              name="$product_name"
+              desc=""
+              price="null"
+            fi
+
+            has_logo="false"
+            [ -f "$product_dir/logo.svg" ] && has_logo="true"
+
+            cat >> _site/products/products.json << OBJ
+            {"slug": "$product_name", "name": "$name", "description": "$desc", "price": $price, "logo": $has_logo}
+          OBJ
+          done
+          echo ']' >> _site/products/products.json
+
+      - name: Upload Pages artifact
+        if: steps.check.outputs.has_products == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: needs.build-catalog.outputs.has_products == 'true'
+    needs: build-catalog
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
