@@ -659,6 +659,29 @@ def launch():
     click.echo()
 
 
+@cli.command()
+@click.option("--port", "-p", type=int, default=8080, help="Port to serve on")
+@click.option("--host", default="0.0.0.0", help="Host to bind to")
+@click.option("--open", "open_browser", is_flag=True, help="Open browser automatically")
+def web(port: int, host: str, open_browser: bool):
+    """Start the JTECH web dashboard in your browser."""
+    llm = get_llm()
+    if not llm.available:
+        click.echo("⚠️  No NVIDIA API key found. The dashboard will load but building products won't work.")
+        click.echo("   Set NVIDIA_API_KEY in .env to enable product building.")
+        click.echo()
+
+    click.echo(f"🚀  Starting JTECH web dashboard on http://{host}:{port}")
+    if open_browser:
+        import webbrowser
+        webbrowser.open(f"http://localhost:{port}")
+        click.echo(f"   Opening browser to http://localhost:{port}")
+    click.echo()
+
+    from jtech.web.server import run_server
+    run_server(host=host, port=port)
+
+
 def main():
     """Entry point for the jtech CLI."""
     cli()

@@ -1,0 +1,1 @@
+"""JTECH Web — Browser interface for JTECH."""
