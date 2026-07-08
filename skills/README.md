@@ -25,7 +25,7 @@ timeout: max expected seconds
 
 ## Creating a New Skill
 
-1. Create a markdown file in `skills/default/`
+1. Create a markdown file in `skills/`
 2. Add YAML frontmatter with metadata
 3. Define the workflow steps
 4. Specify expected output format
