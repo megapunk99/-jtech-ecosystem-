@@ -61,6 +61,7 @@ from jtech.company.departments.designer import Designer, BrandManager
 from jtech.company.departments.sales_agent import SalesAgent
 from jtech.studio import ProductStudio
 from jtech.marketplace import Marketplace
+from jtech.improve import Improver
 
 logger = logging.getLogger(__name__)
 
@@ -657,6 +658,49 @@ def launch():
     click.echo(f"\n✅  Built: {result['name']} (${result['price']:.2f})")
     click.echo(f"   📁  {result['project_path']}")
     click.echo()
+
+
+@cli.command()
+@click.argument("source")
+@click.argument("destination")
+@click.option("--report", is_flag=True, help="Show detailed report")
+def improve(source: str, destination: str, report: bool):
+    """Copy a project and improve its code quality.
+
+    SOURCE is the path to the project to improve.
+    DESTINATION is where to save the improved copy.
+
+    Example:
+        jtech improve C:/source/my-project C:/dest/my-project
+    """
+    llm = get_llm()
+    if not llm.available:
+        click.echo("⚠️  No API key configured. Improvements will be basic.")
+
+    improver = Improver()
+    result = improver.improve(source, destination)
+
+    if not result.get("success"):
+        click.echo(f"❌  {result.get('error', 'Failed to improve project')}")
+        return
+
+    title("JTECH Improvement Complete")
+
+    click.echo(f"   Source:      {result['source']}")
+    click.echo(f"   Destination: {result['destination']}")
+    click.echo(f"   Files:       {result['files_copied']}")
+    click.echo(f"   Issues:      {result['issues_found']} found, {result['issues_fixed']} fixed")
+    click.echo(f"   Time:        {result['elapsed_seconds']}s")
+    click.echo()
+
+    if result.get('fixes'):
+        click.echo("   Fixes Applied:")
+        for fix in result['fixes']:
+            click.echo(f"     ✅ {fix['file']}: {fix['type']}")
+        click.echo()
+
+    if report and result.get('report'):
+        click.echo(result['report'])
 
 
 @cli.command()
