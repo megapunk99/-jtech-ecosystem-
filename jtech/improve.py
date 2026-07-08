@@ -11,12 +11,10 @@ the improvement engine actually:
 
 from __future__ import annotations
 
-import json
 import logging
-import os
+import re
 import shutil
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,17 +30,16 @@ class Improver:
     Pipeline:
     1. COPY — Copy source project to destination
     2. ANALYZE — Scan for issues (bare excepts, missing docstrings, long lines)
-    3. IMPROVE — Fix common issues
-    4. REPORT — Summary of all changes made
+    3. IMPROVE — Fix common issues (bare excepts, add docstring stubs)
+    4. AI IMPROVE — LLM-powered improvements on medium files
+    5. REPORT — Summary of all changes made
     """
 
     def __init__(self):
         self.llm = get_llm()
 
     def improve(self, source: str, destination: str) -> dict:
-        """
-        Copy a project from source to destination and improve it.
-        """
+        """Copy a project from source to destination and improve it."""
         start = time.time()
         source_path = Path(source)
         dest_path = Path(destination)
@@ -65,17 +62,17 @@ class Improver:
         logger.info(f"  Phase 3: Fixing {len(issues)} issues...")
         fixes = self._fix_issues(dest_path, issues)
 
-        # Phase 4: AI improve key files
+        # Phase 4: AI improve medium files (2K-30K chars)
         ai_fixes = 0
-        if self.llm.available and issues:
+        if self.llm.available:
             py_files = sorted(dest_path.rglob("*.py"))
-            # Pick the 2 largest Python files for AI improvement
             candidates = [
                 f for f in py_files
                 if "__pycache__" not in str(f) and ".egg-info" not in str(f)
             ]
-            candidates.sort(key=lambda f: f.stat().st_size, reverse=True)
-            for cf in candidates[:2]:
+            medium = [f for f in candidates if 2000 < f.stat().st_size < 30000]
+            medium.sort(key=lambda f: f.stat().st_size, reverse=True)
+            for cf in medium[:3]:
                 rel = str(cf.relative_to(dest_path))
                 logger.info(f"  AI improving: {rel}")
                 result = self.ai_improve_file(rel, dest_path)
@@ -144,7 +141,7 @@ class Improver:
                 rel = str(py_file.relative_to(project_path))
                 lines = content.split("\n")
 
-                # --- bare except ---
+                # bare except
                 for i, line in enumerate(lines, 1):
                     s = line.strip()
                     if s == "except:" or s == "except :":
@@ -155,7 +152,7 @@ class Improver:
                             "code": s,
                         })
 
-                # --- missing docstrings ---
+                # missing docstrings
                 for i, line in enumerate(lines, 1):
                     s = line.strip()
                     if s.startswith("def ") or s.startswith("class "):
@@ -175,7 +172,7 @@ class Improver:
                                 "code": s[:60],
                             })
 
-                # --- long lines ---
+                # long lines
                 for i, line in enumerate(lines, 1):
                     if len(line.rstrip("\n")) > 120:
                         issues.append({
@@ -194,7 +191,7 @@ class Improver:
     # ── FIX ────────────────────────────────────────────────────
 
     def _fix_issues(self, project_path: Path, issues: list[dict]) -> list[dict]:
-        """Fix identified issues. Currently handles bare excepts."""
+        """Fix identified issues — bare excepts AND missing docstrings."""
         by_file: dict[str, list[dict]] = {}
         for issue in issues:
             by_file.setdefault(issue["file"], []).append(issue)
@@ -208,6 +205,8 @@ class Improver:
                 content = full_path.read_text(encoding="utf-8")
                 lines = content.split("\n")
                 modified = False
+                bare_fixes = 0
+                docstring_fixes = 0
 
                 for issue in file_issues:
                     if issue["type"] == "bare_except":
@@ -217,22 +216,47 @@ class Improver:
                             indent = old[: len(old) - len(old.lstrip())]
                             lines[idx] = f"{indent}except Exception:  # Fixed: was bare except\n"
                             modified = True
+                            bare_fixes += 1
+
+                    elif issue["type"] == "missing_docstring":
+                        idx = issue["line"] - 1
+                        if idx < len(lines):
+                            # Find the colon that ends the def/class signature
+                            for k in range(idx, min(idx + 6, len(lines))):
+                                stripped = lines[k].strip()
+                                if stripped.rstrip().endswith(":"):
+                                    # Detect indentation from the next non-empty line
+                                    indent = "    "
+                                    for m in range(k + 1, min(k + 4, len(lines))):
+                                        if lines[m].strip() and not lines[m].strip().startswith("#"):
+                                            actual = lines[m]
+                                            indent = actual[: len(actual) - len(actual.lstrip())]
+                                            break
+                                    lines.insert(k + 1, f'{indent}"""TODO: Add docstring."""')
+                                    modified = True
+                                    docstring_fixes += 1
+                                    break
 
                 if modified:
                     full_path.write_text("\n".join(lines))
-                    count = sum(1 for i in file_issues if i["type"] == "bare_except")
-                    if count > 0:
+                    if bare_fixes > 0:
                         fixes.append({
                             "file": file_path,
                             "type": "fixed_bare_excepts",
-                            "count": count,
+                            "count": bare_fixes,
+                        })
+                    if docstring_fixes > 0:
+                        fixes.append({
+                            "file": file_path,
+                            "type": "added_docstring_stubs",
+                            "count": docstring_fixes,
                         })
             except Exception as e:
                 logger.debug(f"Could not fix {file_path}: {e}")
         return fixes
 
     def ai_improve_file(self, file_path: str, project_path: Path) -> Optional[str]:
-        """Use AI to improve a single file."""
+        """Use AI to improve a single file (add docstrings, error handling, type hints)."""
         if not self.llm.available:
             return None
         full_path = project_path / file_path
@@ -240,22 +264,40 @@ class Improver:
             return None
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
-            if len(content) > 8000:
+            if len(content) > 50000:
                 return None
-            prompt = (
-                f"Improve this Python code. Add error handling, improve documentation, "
-                f"fix bugs, and add type hints where appropriate.\n\n"
-                f"File: {file_path}\n\n"
-                f"```python\n{content}\n```\n\n"
-                f"Output the COMPLETE improved file. Keep the same functionality."
-            )
+
+            if len(content) > 8000:
+                prompt = (
+                    f"Add docstrings to any public functions/classes missing them. "
+                    f"Do not change any functionality.\n\n"
+                    f"File: {file_path}\n\n"
+                    f"```python\n{content[:40000]}\n```\n\n"
+                    f"Output the COMPLETE file with docstrings added."
+                )
+            else:
+                prompt = (
+                    f"Improve this Python code. Add error handling, improve documentation, "
+                    f"fix bugs, and add type hints where appropriate.\n\n"
+                    f"File: {file_path}\n\n"
+                    f"```python\n{content}\n```\n\n"
+                    f"Output the COMPLETE improved file. Keep the same functionality."
+                )
+
             improved = self.llm.chat(
                 [{"role": "user", "content": prompt}],
                 system_prompt="Senior Python engineer. Improve code quality without breaking functionality.",
                 thinking_effort=ThinkingEffort.MINIMAL,
-                max_tokens=4096,
+                max_tokens=8192,
             )
-            if improved and len(improved) > len(content) * 0.5:
+            if improved and len(improved) > len(content) * 0.3:
+                # Strip markdown code fences if present
+                fence_match = re.search(
+                    r'```(?:python|py)?\n(.*?)```',
+                    improved, re.DOTALL
+                )
+                if fence_match:
+                    improved = fence_match.group(1).strip()
                 full_path.write_text(improved, encoding="utf-8")
                 return improved
         except Exception as e:
@@ -281,7 +323,7 @@ class Improver:
             "",
         ]
         if fixes:
-            lines.append("Static Fixes:")
+            lines.append("Fixes Applied:")
             for f in fixes:
                 lines.append(f"  + {f['file']}: {f['type']} ({f['count']} fix{'es' if f['count'] > 1 else ''})")
             lines.append("")
