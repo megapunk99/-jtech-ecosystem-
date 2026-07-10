@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import time
 import urllib.request
@@ -190,18 +191,62 @@ THINK_PROMPT = (
 
 
 class LLMClient:
-    """DeepSeek-powered LLM client with thinking mode and personality control."""
+    """DeepSeek-powered LLM client with thinking mode, personality control, and API key rotation."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or os.environ.get("NVIDIA_API_KEY") or ""
+        self.keys: list[str] = []
+        self._current_key_index = 0
+        self._load_keys(api_key)
+
         self.model = model or os.environ.get("NVIDIA_MODEL") or DEFAULT_MODEL
         self.usage = LLMUsage()
         self.base_url = NVIDIA_BASE_URL
         self.default_personality = Personality.PROFESSIONAL
-        self.default_effort = ThinkingEffort.HIGH
+        self.default_effort = ThinkingEffort.MEDIUM
 
-        if not self.api_key:
+        if not self.keys:
             logger.warning("No NVIDIA_API_KEY set — AI operations will fail")
+
+    def _load_keys(self, provided_key: Optional[str] = None) -> None:
+        """Load API keys from env vars NVIDIA_API_KEY_1 through _N, plus fallback."""
+        keys = []
+
+        # If a key was provided directly, use it
+        if provided_key:
+            keys.append(provided_key)
+
+        # Load NVIDIA_API_KEY_1, NVIDIA_API_KEY_2, ... NVIDIA_API_KEY_N
+        for i in range(1, 20):
+            key = os.environ.get(f"NVIDIA_API_KEY_{i}")
+            if key and key not in keys:
+                keys.append(key)
+
+        # Fallback to NVIDIA_API_KEY (backward compat)
+        fallback = os.environ.get("NVIDIA_API_KEY")
+        if fallback and fallback not in keys:
+            keys.append(fallback)
+
+        self.keys = keys
+        self._current_key_index = 0
+
+    @property
+    def api_key(self) -> str:
+        """Get the current active API key."""
+        if not self.keys:
+            return ""
+        idx = self._current_key_index % len(self.keys)
+        return self.keys[idx]
+
+    def _rotate_key(self) -> None:
+        """Rotate to the next API key."""
+        if not self.keys:
+            return
+        self._current_key_index = (self._current_key_index + 1) % len(self.keys)
+        logger.info(f"Rotated to API key {self._current_key_index + 1}/{len(self.keys)}")
+
+    @property
+    def num_keys(self) -> int:
+        return len(self.keys)
 
     @property
     def available(self) -> bool:
@@ -270,118 +315,115 @@ class LLMClient:
     # ── INTERNAL API ────────────────────────────────────────────
 
     def _chat_internal(self, messages: list[dict], system_prompt: Optional[str] = None,
-                       max_tokens: int = 8192, temperature: float = 0.3,
+                       max_tokens: int = 4096, temperature: float = 0.3,
                        thinking_effort: Optional[ThinkingEffort] = None,
                        personality: Optional[Personality] = None) -> LLMResponse:
-        """Internal method that does the actual API call."""
+        """Internal method that does the actual API call with retry on 503."""
         effort = thinking_effort or self.default_effort
         pers = personality or self.default_personality
 
         if not self.api_key:
             return LLMResponse(content="")
 
-        # Build system prompt with personality + thinking instructions
+        # Build system prompt
         sp_parts = []
         sp_parts.append(PERSONALITY_PROMPTS.get(pers, PERSONALITY_PROMPTS[Personality.PROFESSIONAL]))
         if system_prompt:
             sp_parts.append(system_prompt)
 
-        # Add thinking instructions based on effort
-        if effort == ThinkingEffort.DEEP:
-            sp_parts.append(
-                "Think deeply before answering. Analyze, reason, challenge your own conclusions, "
-                "then respond. Use <think>...</think> tags for your reasoning."
-            )
-        elif effort == ThinkingEffort.RECURSIVE:
-            sp_parts.append(
-                "This requires recursive thinking. First analyze the request deeply. "
-                "Then review your analysis for flaws. Then refine. Then respond. "
-                "Use <think>...</think> tags to show your full reasoning process."
-            )
-        elif effort == ThinkingEffort.HIGH:
-            sp_parts.append(
-                "Think carefully about this. Show your reasoning in <think>...</think> tags."
-            )
+        if effort == ThinkingEffort.DEEP or effort == ThinkingEffort.HIGH:
+            sp_parts.append("Think step-by-step before answering.")
         elif effort == ThinkingEffort.MINIMAL:
-            sp_parts.append("Be brief and direct. No thinking preamble needed.")
+            sp_parts.append("Be brief and direct.")
 
-        combined_sp = "\n\n".join(sp_parts)
+        combined_sp = "\n".join(sp_parts)
 
         msgs = list(messages)
         msgs.insert(0, {"role": "system", "content": combined_sp})
 
-        # Set max_tokens based on effort — deep thinking needs more room
-        actual_max = max_tokens
+        actual_max = min(max_tokens, 4096)
         if effort in (ThinkingEffort.DEEP, ThinkingEffort.RECURSIVE):
-            actual_max = max(max_tokens, 16384)
+            actual_max = 8192
 
-        try:
-            payload = json.dumps({
-                "model": self.model,
-                "messages": msgs,
-                "max_tokens": actual_max,
-                "temperature": temperature,
-            }).encode("utf-8")
+        payload = json.dumps({
+            "model": self.model,
+            "messages": msgs,
+            "max_tokens": actual_max,
+            "temperature": min(temperature, 0.5),
+        }).encode("utf-8")
 
-            start_time = time.time()
-            req = urllib.request.Request(
-                f"{self.base_url}/chat/completions",
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                method="POST",
-            )
+        # Retry loop for 503 errors
+        max_retries = 3
+        base_delay = 3.0
 
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = json.loads(resp.read())
-            elapsed = time.time() - start_time
-
-            # Extract content and reasoning
-            choice = data.get("choices", [{}])[0]
-            msg = choice.get("message", {})
-            content = msg.get("content", "")
-
-            # DeepSeek-style: extract reasoning from <think> tags
-            reasoning = ReasoningTrace()
-            if "<think>" in content:
-                think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
-                if think_match:
-                    reasoning.raw_think_content = think_match.group(1).strip()
-                    reasoning.final_answer = content[think_match.end():].strip()
-                    reasoning.steps = reasoning.extract_steps()
-                    reasoning.self_corrections = reasoning.get_corrections()
-
-            # Track usage
-            if "usage" in data:
-                u = data["usage"]
-                self.usage += LLMUsage(
-                    prompt_tokens=u.get("prompt_tokens", 0),
-                    completion_tokens=u.get("completion_tokens", 0),
-                    total_tokens=u.get("total_tokens", 0),
-                    reasoning_tokens=u.get("completion_tokens", 0) - len(reasoning.raw_think_content.split()),
-                    api_calls=1,
+        for attempt in range(max_retries + 1):
+            try:
+                start_time = time.time()
+                req = urllib.request.Request(
+                    f"{self.base_url}/chat/completions",
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}",
+                    },
+                    method="POST",
                 )
 
-            logger.debug(f"LLM call in {elapsed:.1f}s | "
-                         f"thinking={bool(reasoning.raw_think_content)} | "
-                         f"corrections={len(reasoning.self_corrections)}")
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    data = json.loads(resp.read())
+                elapsed = time.time() - start_time
 
-            final_content = reasoning.final_answer if reasoning.final_answer else content
-            return LLMResponse(
-                content=final_content,
-                reasoning=reasoning,
-                usage=self.usage,
-                raw=data,
-            )
+                # Extract content
+                choice = data.get("choices", [{}])[0]
+                msg = choice.get("message", {})
+                content = msg.get("content", "")
 
-        except urllib.error.HTTPError as e:
-            logger.error(f"NVIDIA API HTTP {e.code}: {e.read().decode()[:300]}")
-            return LLMResponse(content="")
-        except Exception as e:
-            logger.error(f"NVIDIA API error: {e}")
-            return LLMResponse(content="")
+                # Extract reasoning from <think> tags
+                reasoning = ReasoningTrace()
+                if "<think>" in content:
+                    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
+                    if think_match:
+                        reasoning.raw_think_content = think_match.group(1).strip()
+                        reasoning.final_answer = content[think_match.end():].strip()
+
+                if "usage" in data:
+                    u = data["usage"]
+                    self.usage += LLMUsage(
+                        prompt_tokens=u.get("prompt_tokens", 0),
+                        completion_tokens=u.get("completion_tokens", 0),
+                        total_tokens=u.get("total_tokens", 0),
+                        api_calls=1,
+                    )
+
+                logger.debug(f"LLM call in {elapsed:.1f}s | tokens={self.usage.total_tokens}")
+
+                final = reasoning.final_answer if reasoning.final_answer else content
+                return LLMResponse(content=final, reasoning=reasoning, usage=self.usage, raw=data)
+
+            except urllib.error.HTTPError as e:
+                status = e.code
+                body = e.read().decode()[:200]
+                if status == 503 and attempt < max_retries:
+                    # Rotate to next API key and retry immediately
+                    self._rotate_key()
+                    delay = 0.5 + random.uniform(0, 0.5)  # Small delay to avoid stampede
+                    logger.warning(f"API 503 — rotated to key {self._current_key_index + 1}/{len(self.keys)}")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"NVIDIA API HTTP {status}: {body}")
+                    return LLMResponse(content="")
+            except Exception as e:
+                if "timeout" in str(e).lower() and attempt < max_retries:
+                    # Rotate key on timeout too
+                    self._rotate_key()
+                    delay = 0.5 + random.uniform(0, 0.5)
+                    logger.warning(f"Timeout on key {self._current_key_index + 1}, retrying with next key...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"API error: {e}")
+                    return LLMResponse(content="")
+
+        return LLMResponse(content="")
 
     # ── JSON EXTRACTION ─────────────────────────────────────────
 

@@ -39,6 +39,7 @@ HOST = os.environ.get("JTECH_WEB_HOST", "0.0.0.0")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BUILT_PRODUCTS_DIR = Path(__file__).resolve().parent.parent.parent / "built_products"
+JTECH_DIR = Path(__file__).resolve().parent.parent.parent
 
 # ── MIME TYPES ──────────────────────────────────────────────────
 
